@@ -10,6 +10,7 @@
 import { checkAnchor } from "./anchor.js";
 import { parseCredential } from "./credential.js";
 import { verifyInclusion } from "./merkle.js";
+import { query } from "./nostr.js";
 import { checkSignature, expectedDebit, GENESIS } from "./receipt.js";
 
 /** @typedef {import("./receipt.js").Receipt} Receipt */
@@ -113,15 +114,8 @@ export function checkChain(receipts, { issuer, credential, previous }) {
  * @param {string[]} relays
  */
 async function findAnchorNote(issuer, anchorId, relays) {
-	const { SimplePool } = await import("nostr-tools/pool");
-	const { verifyEvent } = await import("nostr-tools/pure");
-	const pool = new SimplePool();
-	try {
-		const events = await pool.querySync(relays, { authors: [issuer], kinds: [1], "#x": [anchorId] }, { maxWait: 5000 });
-		return events.some((e) => verifyEvent(e) && e.pubkey === issuer && e.tags.some((t) => t[0] === "x" && t[1] === anchorId));
-	} finally {
-		pool.close(relays);
-	}
+	const events = await query({ authors: [issuer], kinds: [1], "#x": [anchorId] }, relays);
+	return events.some((e) => e.pubkey === issuer && e.tags.some((/** @type {string[]} */ t) => t[0] === "x" && t[1] === anchorId));
 }
 
 /**

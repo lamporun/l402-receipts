@@ -50,6 +50,21 @@ export type AnchorJobOptions = {
     publish?: (event: any, relays: string[]) => Promise<string[]>;
 };
 /**
+ * @typedef {object} AnchorJobOptions
+ * @property {Ledger} ledger
+ * @property {AnchorDir} anchors
+ * @property {Uint8Array} secretKey
+ * @property {string} issuer
+ * @property {string} since the first day to anchor
+ * @property {string} publicUrl e.g. https://lampo.run
+ * @property {string} seller e.g. lampo.run
+ * @property {string[]} relays Nostr relays to publish to; empty to skip
+ * @property {boolean} timestamp whether to stamp with OpenTimestamps
+ * @property {number} [now] unix seconds, for tests
+ * @property {(msg: string) => void} [log]
+ * @property {(event: any, relays: string[]) => Promise<string[]>} [publish]
+ */
+/**
  * Anchors every complete UTC day from `since` to yesterday that has no
  * anchor yet, then retries missing timestamps and notes, and upgrades
  * pending timestamps. Safe to run as often as wanted.

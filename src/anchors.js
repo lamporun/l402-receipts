@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { finalizeEvent } from "nostr-tools/pure";
 import { addDays, anchorNote, dayBounds, dayOf, makeAnchor } from "./anchor.js";
+import { publish as nostrPublish } from "./nostr.js";
 import { GENESIS } from "./receipt.js";
 import * as ots from "./ots.js";
 
@@ -91,22 +92,6 @@ export class AnchorDir {
  */
 
 /**
- * Publishes an event to relays. Resolves with the relays that accepted it.
- * @param {any} event
- * @param {string[]} relays
- */
-async function publishToRelays(event, relays) {
-	const { SimplePool } = await import("nostr-tools/pool");
-	const pool = new SimplePool();
-	try {
-		const results = await Promise.allSettled(pool.publish(relays, event));
-		return relays.filter((_, i) => results[i].status === "fulfilled");
-	} finally {
-		pool.close(relays);
-	}
-}
-
-/**
  * Anchors every complete UTC day from `since` to yesterday that has no
  * anchor yet, then retries missing timestamps and notes, and upgrades
  * pending timestamps. Safe to run as often as wanted.
@@ -114,7 +99,7 @@ async function publishToRelays(event, relays) {
  */
 export async function runAnchorJob(o) {
 	const log = o.log ?? (() => {});
-	const publish = o.publish ?? publishToRelays;
+	const publish = o.publish ?? nostrPublish;
 	const now = o.now ?? Math.floor(Date.now() / 1000);
 	const yesterday = addDays(dayOf(now), -1);
 	const made = [];
