@@ -8,11 +8,15 @@
 		"l402-receipts": "bin/l402-receipts.js"
 	},
 	"exports": {
-		".": "./src/index.js"
+		".": {
+			"types": "./types/index.d.ts",
+			"default": "./src/index.js"
+		}
 	},
 	"files": [
 		"bin",
 		"src",
+		"types",
 		"SPEC.md",
 		"README.md",
 		"LICENSE"
@@ -22,7 +26,8 @@
 	},
 	"scripts": {
 		"test": "node --test 'test/**/*.test.js'",
-		"check": "tsc -p jsconfig.json"
+		"check": "tsc -p jsconfig.json",
+		"types": "rm -rf types && tsc -p jsconfig.types.json"
 	},
 	"repository": {
 		"type": "git",
@@ -47,5 +52,6 @@
 	"devDependencies": {
 		"@types/node": "26.6.6",
 		"typescript": "7.0.2"
-	}
+	},
+	"types": "./types/index.d.ts"
 }
