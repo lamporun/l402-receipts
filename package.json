@@ -1,0 +1,51 @@
+{
+	"name": "l402-receipts",
+	"version": "0.1.0",
+	"description": "Signed, verifiable usage receipts for metered L402 APIs: every debit can be recomputed by the buyer, and every day of receipts is anchored on Nostr and in Bitcoin.",
+	"type": "module",
+	"license": "MIT",
+	"bin": {
+		"l402-receipts": "bin/l402-receipts.js"
+	},
+	"exports": {
+		".": "./src/index.js"
+	},
+	"files": [
+		"bin",
+		"src",
+		"SPEC.md",
+		"README.md",
+		"LICENSE"
+	],
+	"engines": {
+		"node": ">=22.13"
+	},
+	"scripts": {
+		"test": "node --test 'test/**/*.test.js'",
+		"check": "tsc -p jsconfig.json"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/lamporun/l402-receipts.git"
+	},
+	"keywords": [
+		"l402",
+		"lightning",
+		"bitcoin",
+		"receipts",
+		"metering",
+		"llm",
+		"agents",
+		"nostr",
+		"opentimestamps"
+	],
+	"dependencies": {
+		"@noble/curves": "2.0.1",
+		"@noble/hashes": "2.0.1",
+		"nostr-tools": "2.26.1"
+	},
+	"devDependencies": {
+		"@types/node": "26.6.6",
+		"typescript": "7.0.2"
+	}
+}
