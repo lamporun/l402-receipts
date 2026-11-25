@@ -32,6 +32,8 @@ npx github:lamporun/l402-receipts verify --seller https://lampo.run \
   --credential "L402 AgEEbHNhd...:9f86d081..." --nostr
 ```
 
+Example output:
+
 ```
 https://lampo.run, issuer 30699c50…
 4 receipts: 4 debits recomputed exactly, 0 settled at an estimate
