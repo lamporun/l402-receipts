@@ -73,6 +73,13 @@ export type BundleReport = {
      * anchors found on Nostr relays
      */
     onNostr: number;
+    /**
+     * anchors whose timestamp is in a Bitcoin block
+     */
+    inBitcoin: {
+        day: string;
+        height: number;
+    }[];
     problems: string[];
     receipts: Receipt[];
 };
@@ -84,6 +91,8 @@ export type BundleReport = {
  * @param {string} [o.issuer] the issuer key to require; defaults to the seller's published one
  * @param {boolean} [o.checkNostr]
  * @param {Receipt[]} [o.known] receipts saved earlier, which must not have changed
+ * @param {boolean} [o.checkBitcoin] check each anchor's timestamp against a block explorer
+ * @param {string} [o.explorer] an Esplora API, default https://mempool.space/api
  * @param {typeof fetch} [o.fetch]
  * @returns {Promise<BundleReport>}
  */
@@ -93,5 +102,7 @@ export declare function verifyBundle(o: {
     issuer?: string;
     checkNostr?: boolean;
     known?: Receipt[];
+    checkBitcoin?: boolean;
+    explorer?: string;
     fetch?: typeof fetch;
 }): Promise<BundleReport>;

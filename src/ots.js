@@ -7,7 +7,9 @@
 // calendar's answer per branch lets a later upgrade swap in the calendar's
 // complete proof without parsing it.
 
+import { ripemd160, sha1 } from "@noble/hashes/legacy.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { keccak_256 } from "@noble/hashes/sha3.js";
 import { bytesToHex, concatBytes, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 
 export const CALENDARS = [
@@ -21,6 +23,11 @@ const OP_SHA256 = 0x08;
 const OP_APPEND = 0xf0;
 const BRANCH = 0xff;
 const BITCOIN_ATTESTATION = hexToBytes("0588960d73d71901");
+const PENDING_ATTESTATION = hexToBytes("83dfe30d2ef90c8e");
+const OP_PREPEND = 0xf1;
+const ATTESTATION = 0x00;
+/** @type {Record<number, (m: Uint8Array) => Uint8Array>} */
+const UNARY = { 0x08: sha256, 0x02: sha1, 0x03: ripemd160, 0x67: keccak_256 };
 
 /**
  * @typedef {object} OtsBranch
@@ -62,9 +69,10 @@ function contains(haystack, needle) {
  * @param {string} url
  * @param {RequestInit} init
  * @param {number} timeoutMs
+ * @param {typeof fetch} [get]
  */
-async function fetchBytes(url, init, timeoutMs) {
-	const res = await fetch(url, {
+async function fetchBytes(url, init, timeoutMs, get = fetch) {
+	const res = await get(url, {
 		...init,
 		redirect: "error",
 		signal: AbortSignal.timeout(timeoutMs),
@@ -113,19 +121,137 @@ export async function stamp(digestHex, opts = {}) {
 }
 
 /**
- * Asks each pending calendar for its complete proof. Returns the state with
- * the branches that are now anchored in Bitcoin, and whether anything changed.
+ * @param {Uint8Array} buf
+ * @param {number} pos
+ * @returns {[number, number]}
+ */
+function readVaruint(buf, pos) {
+	let x = 0;
+	let shift = 0;
+	for (let i = 0; i < 9; i++) {
+		if (pos >= buf.length) throw new Error("truncated timestamp");
+		const b = buf[pos++];
+		x += (b & 0x7f) * 2 ** shift;
+		if (b < 0x80) return [x, pos];
+		shift += 7;
+	}
+	throw new Error("varuint too long");
+}
+
+/** @param {Uint8Array} a @param {Uint8Array} b */
+function equal(a, b) {
+	return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/**
+ * @typedef {object} Leaf
+ * @property {"pending" | "bitcoin" | "other"} kind
+ * @property {number} start offset of the attestation's 0x00 tag
+ * @property {number} end offset just past it
+ * @property {string} [uri] the calendar that will complete a pending one
+ * @property {number} [height] the block of a Bitcoin attestation
+ * @property {Uint8Array} msg the message attested: for Bitcoin, the block's
+ *   merkle root as it appears in the header
+ */
+
+/**
+ * Walks a serialized timestamp of `msg`, the way the ots client reads it,
+ * and collects its pending attestations with the message each one commits.
+ * @param {Uint8Array} buf
+ * @param {number} pos
+ * @param {Uint8Array} msg
+ * @param {Leaf[]} out
+ * @param {number} depth
+ * @returns {number} the offset after the timestamp
+ */
+function walkTimestamp(buf, pos, msg, out, depth = 0) {
+	if (depth > 256) throw new Error("timestamp too deep");
+	for (;;) {
+		if (pos >= buf.length) throw new Error("truncated timestamp");
+		let tag = buf[pos++];
+		const last = tag !== BRANCH;
+		if (!last) tag = buf[pos++];
+		pos = walkItem(tag, buf, pos, msg, out, depth);
+		if (last) return pos;
+	}
+}
+
+/**
+ * @param {number} tag
+ * @param {Uint8Array} buf
+ * @param {number} pos offset just after the tag
+ * @param {Uint8Array} msg
+ * @param {Leaf[]} out
+ * @param {number} depth
+ */
+function walkItem(tag, buf, pos, msg, out, depth) {
+	if (tag === ATTESTATION) {
+		const start = pos - 1;
+		const kind = buf.subarray(pos, pos + 8);
+		const [len, p] = readVaruint(buf, pos + 8);
+		const payload = buf.subarray(p, p + len);
+		if (p + len > buf.length) throw new Error("truncated attestation");
+		if (equal(kind, PENDING_ATTESTATION)) {
+			const [ulen, up] = readVaruint(payload, 0);
+			const uri = new TextDecoder().decode(payload.subarray(up, up + ulen));
+			out.push({ kind: "pending", start, end: p + len, uri, msg });
+		} else if (equal(kind, BITCOIN_ATTESTATION)) {
+			out.push({ kind: "bitcoin", start, end: p + len, height: readVaruint(payload, 0)[0], msg });
+		} else {
+			out.push({ kind: "other", start, end: p + len, msg });
+		}
+		return p + len;
+	}
+	let next;
+	if (tag === OP_APPEND || tag === OP_PREPEND) {
+		const [len, p] = readVaruint(buf, pos);
+		const arg = buf.subarray(p, p + len);
+		if (p + len > buf.length) throw new Error("truncated operation");
+		next = tag === OP_APPEND ? concatBytes(msg, arg) : concatBytes(arg, msg);
+		pos = p + len;
+	} else if (UNARY[tag]) {
+		next = UNARY[tag](msg);
+	} else {
+		throw new Error(`unknown timestamp operation 0x${tag.toString(16)}`);
+	}
+	return walkTimestamp(buf, pos, next, out, depth + 1);
+}
+
+/**
+ * Asks the calendars named in each pending attestation for their complete
+ * proof, as the ots client's upgrade does, and splices it in place of the
+ * attestation. Returns the new state and whether anything changed.
  * @param {OtsState} state
- * @param {{ timeoutMs?: number }} [opts]
+ * @param {{ timeoutMs?: number, fetch?: typeof fetch }} [opts]
  */
 export async function upgrade(state, opts = {}) {
+	const get = opts.fetch ?? fetch;
 	let changed = false;
 	const branches = await Promise.all(
 		state.branches.map(async (b) => {
 			if (b.complete) return b;
 			try {
-				const answer = await fetchBytes(`${b.calendar}/timestamp/${b.commitment}`, { method: "GET" }, opts.timeoutMs ?? 15000);
+				let answer = hexToBytes(b.answer);
+				/** @type {Leaf[]} */
+				const leaves = [];
+				walkTimestamp(answer, 0, hexToBytes(b.commitment), leaves);
+				const pending = leaves.filter((l) => l.kind === "pending" && l.uri);
+				// Later offsets first, so earlier ones stay valid.
+				for (const leaf of pending.sort((x, y) => y.start - x.start)) {
+					if (!leaf.uri || !/^https:\/\/[a-z0-9.-]+(:\d+)?(\/[\w./-]*)?$/i.test(leaf.uri)) continue;
+					let upgraded;
+					try {
+						upgraded = await fetchBytes(`${leaf.uri.replace(/\/$/, "")}/timestamp/${bytesToHex(leaf.msg)}`, { method: "GET" }, opts.timeoutMs ?? 15000, get);
+					} catch {
+						continue;
+					}
+					if (!contains(upgraded, BITCOIN_ATTESTATION) || upgraded[0] === BRANCH) continue;
+					// The answer must itself be a valid timestamp of that message.
+					walkTimestamp(upgraded, 0, leaf.msg, []);
+					answer = concatBytes(answer.subarray(0, leaf.start), upgraded, answer.subarray(leaf.end));
+				}
 				if (!contains(answer, BITCOIN_ATTESTATION)) return b;
+				walkTimestamp(answer, 0, hexToBytes(b.commitment), []);
 				changed = true;
 				return { ...b, answer: bytesToHex(answer), complete: true };
 			} catch {
@@ -150,4 +276,52 @@ export function otsFile(state) {
 		parts.push(Uint8Array.of(OP_APPEND), varuint(nonce.length), nonce, Uint8Array.of(OP_SHA256), hexToBytes(b.answer));
 	});
 	return concatBytes(...parts);
+}
+
+/**
+ * The Bitcoin attestations a stamp has reached: for each, the block height
+ * and the merkle root the proof commits to, as block explorers show it. It
+ * must equal that block's merkle root.
+ * @param {OtsState} state
+ * @returns {{ calendar: string, height: number, merkleRoot: string }[]}
+ */
+export function bitcoinAttestations(state) {
+	/** @type {{ calendar: string, height: number, merkleRoot: string }[]} */
+	const out = [];
+	for (const b of state.branches) {
+		/** @type {Leaf[]} */
+		const leaves = [];
+		try {
+			walkTimestamp(hexToBytes(b.answer), 0, hexToBytes(b.commitment), leaves);
+		} catch {
+			continue;
+		}
+		for (const l of leaves) {
+			// Explorers show the root byte-reversed, like block hashes.
+			if (l.kind === "bitcoin") out.push({ calendar: b.calendar, height: /** @type {number} */ (l.height), merkleRoot: bytesToHex(l.msg.slice().reverse()) });
+		}
+	}
+	return out;
+}
+
+/**
+ * Reads a .ots file for the given digest and returns its Bitcoin
+ * attestations, as bitcoinAttestations does. Throws when the file is not an
+ * OpenTimestamps proof of that SHA-256 digest.
+ * @param {Uint8Array} file
+ * @param {string} digestHex
+ */
+export function otsFileAttestations(file, digestHex) {
+	const head = MAGIC.length;
+	if (!equal(file.subarray(0, head), MAGIC) || file[head] !== 1 || file[head + 1] !== OP_SHA256) {
+		throw new Error("not an OpenTimestamps SHA-256 proof");
+	}
+	const digest = file.subarray(head + 2, head + 34);
+	if (bytesToHex(digest) !== digestHex) throw new Error("the proof is for another digest");
+	/** @type {Leaf[]} */
+	const leaves = [];
+	walkTimestamp(file, head + 34, digest, leaves);
+	return leaves
+		.filter((l) => l.kind === "bitcoin")
+		.map((l) => ({ height: /** @type {number} */ (l.height), merkleRoot: bytesToHex(l.msg.slice().reverse()) }));
 }

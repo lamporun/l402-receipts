@@ -213,3 +213,83 @@ test("the .ots file has the OpenTimestamps layout", () => {
 	assert.ok(hex.endsWith("ff" + "f010" + "22".repeat(16) + "08" + "00aabb" + "f010" + "33".repeat(16) + "08" + "00ccdd"));
 	assert.ok(!fs.existsSync("/nonexistent"));
 });
+
+test("timestamps upgrade through the calendar named in each pending attestation", async () => {
+	const { upgrade, bitcoinAttestations } = await import("../src/ots.js");
+	const fx = JSON.parse(fs.readFileSync(new URL("./fixtures/ots-stamp.json", import.meta.url), "utf8"));
+	/** @type {string[]} */
+	const asked = [];
+	/** @type {typeof fetch} */
+	const stub = async (input) => {
+		const url = String(input);
+		asked.push(url);
+		const hit = fx.calendars[url];
+		return hit ? new Response(Buffer.from(hit.body, "hex"), { status: hit.status }) : new Response("", { status: 404 });
+	};
+	assert.deepEqual(bitcoinAttestations(fx.state), []);
+	const up = await upgrade(fx.state, { fetch: stub });
+	assert.equal(up.changed, true);
+	// The proofs are completed by the calendars themselves, not the pools we submitted to.
+	assert.ok(asked.every((u) => !u.includes(".pool.")));
+	assert.ok(asked.some((u) => u.startsWith("https://alice.btc.calendar.opentimestamps.org/timestamp/")));
+	const btc = bitcoinAttestations(up.state);
+	assert.ok(btc.length >= 1);
+	// Block 977493's merkle root, as mempool.space shows it.
+	for (const a of btc) assert.deepEqual([a.height, a.merkleRoot], [977493, "ab87896e01794daa4778a10907e0c06e6a83c0cf8953f2fae0736f732392f857"]);
+	// A second upgrade asks only the calendars still pending.
+	asked.length = 0;
+	await upgrade(up.state, { fetch: stub });
+	assert.ok(asked.every((u) => u.includes("eternitywall")));
+});
+
+test("a .ots file is read back, and verify checks it against a block explorer", async (t) => {
+	const { upgrade, otsFile, otsFileAttestations } = await import("../src/ots.js");
+	const { sha256 } = await import("@noble/hashes/sha2.js");
+	const { bytesToHex, concatBytes, hexToBytes } = await import("@noble/hashes/utils.js");
+
+	// The real stamp, completed: its file reads back to block 977493.
+	const fx = JSON.parse(fs.readFileSync(new URL("./fixtures/ots-stamp.json", import.meta.url), "utf8"));
+	/** @type {typeof fetch} */
+	const stub = async (input) => {
+		const hit = fx.calendars[String(input)];
+		return hit ? new Response(Buffer.from(hit.body, "hex"), { status: hit.status }) : new Response("", { status: 404 });
+	};
+	const file = otsFile((await upgrade(fx.state, { fetch: stub })).state);
+	assert.equal(otsFileAttestations(file, fx.state.digest)[0].height, 977493);
+	assert.throws(() => otsFileAttestations(file, "00".repeat(32)), /another digest/);
+
+	// An anchored seller whose day-one anchor has a (synthetic) Bitcoin proof.
+	const s = await seller();
+	t.after(() => s.server.close());
+	const [made] = await runAnchorJob({ ...s.opts, secretKey: s.key.secretKey, timestamp: false, now: s.d1 + 86400 + 600 });
+	const extra = Uint8Array.of(0xaa);
+	const msg = sha256(concatBytes(hexToBytes(made.id), extra));
+	const magic = hexToBytes("004f70656e54696d657374616d7073000050726f6f6600bf89e2e884e89294");
+	const btc = concatBytes(Uint8Array.of(0), hexToBytes("0588960d73d71901"), Uint8Array.of(3, 0xfd, 0x9d, 0x3b));
+	fs.writeFileSync(
+		s.anchors.file(made.day, ".ots"),
+		concatBytes(magic, Uint8Array.of(1, 8), hexToBytes(made.id), Uint8Array.of(0xf0, 1), extra, Uint8Array.of(8), btc),
+	);
+	const blockHeight = otsFileAttestations(fs.readFileSync(s.anchors.file(made.day, ".ots")), made.id)[0].height;
+
+	const root = bytesToHex(msg.slice().reverse());
+	/** @param {string} explorerRoot */
+	const run = (explorerRoot) =>
+		verifyBundle({
+			seller: "http://seller.test",
+			credential: s.alice.header,
+			checkBitcoin: true,
+			explorer: "https://explorer.test/api",
+			fetch: async (input, init) => {
+				const url = String(input);
+				if (url === `https://explorer.test/api/block-height/${blockHeight}`) return new Response("blockhash");
+				if (url === "https://explorer.test/api/block/blockhash") return Response.json({ merkle_root: explorerRoot });
+				return fetch(url.replace("http://seller.test", s.base), init);
+			},
+		});
+	const good = await run(root);
+	assert.deepEqual(good.problems, []);
+	assert.deepEqual(good.inBitcoin, [{ day: made.day, height: blockHeight }]);
+	const bad = await run("00".repeat(32));
+	assert.match(bad.problems.join("\n"), /does not match block/);
+});

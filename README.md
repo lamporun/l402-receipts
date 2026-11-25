@@ -29,7 +29,7 @@ Use the credential you paid with, the `Authorization` value `L402 <macaroon>:<pr
 
 ```sh
 npx github:lamporun/l402-receipts verify --seller https://lampo.run \
-  --credential "L402 AgEEbHNhd...:9f86d081..." --nostr
+  --credential "L402 AgEEbHNhd...:9f86d081..." --nostr --bitcoin
 ```
 
 Real output for a Lampo bundle bought on 25 November 2026, before its first daily anchor:
@@ -43,7 +43,10 @@ bundle 2,509,410 tokens, debited 6,717, 2,502,693 left
 OK: every receipt checks out
 ```
 
-Any problem is printed as `PROBLEM: …` and the command exits with status 1.
+Add `--bitcoin` to also check each anchor's OpenTimestamps proof against the
+block's merkle root on mempool.space (once the timestamp is in a block, a few
+hours after the day ends). Any problem is printed as `PROBLEM: …` and the
+command exits with status 1.
 The credential can also come from `--credential-file` or `L402_CREDENTIAL`.
 
 As a library:

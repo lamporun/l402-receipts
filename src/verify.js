@@ -11,6 +11,7 @@ import { checkAnchor } from "./anchor.js";
 import { parseCredential } from "./credential.js";
 import { verifyInclusion } from "./merkle.js";
 import { query } from "./nostr.js";
+import { otsFileAttestations } from "./ots.js";
 import { checkSignature, expectedDebit, GENESIS } from "./receipt.js";
 
 /** @typedef {import("./receipt.js").Receipt} Receipt */
@@ -103,6 +104,7 @@ export function checkChain(receipts, { issuer, credential, previous }) {
  * @property {ChainReport} chain
  * @property {number} anchored receipts proven to be in a daily anchor
  * @property {number} onNostr anchors found on Nostr relays
+ * @property {{ day: string, height: number }[]} inBitcoin anchors whose timestamp is in a Bitcoin block
  * @property {string[]} problems
  * @property {Receipt[]} receipts
  */
@@ -119,6 +121,35 @@ async function findAnchorNote(issuer, anchorId, relays) {
 }
 
 /**
+ * Checks an anchor's OpenTimestamps proof: that it is a proof of the anchor
+ * id, and that a Bitcoin attestation in it matches the merkle root of its
+ * block on a public explorer. Resolves with the block height, or null while
+ * the timestamp is still pending; throws on a proof that does not hold.
+ * @param {Anchor} a
+ * @param {string} origin
+ * @param {string} explorer
+ * @param {typeof fetch} fetchImpl
+ */
+async function checkTimestamp(a, origin, explorer, fetchImpl) {
+	const res = await fetchImpl(`${origin}/receipts/anchors/${a.day}.ots`, { redirect: "error", signal: AbortSignal.timeout(20000) });
+	if (res.status === 404) return null;
+	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	const atts = otsFileAttestations(new Uint8Array(await res.arrayBuffer()), a.id);
+	for (const att of atts) {
+		const get = async (/** @type {string} */ path) => {
+			const r = await fetchImpl(`${explorer}${path}`, { redirect: "error", signal: AbortSignal.timeout(20000) });
+			if (!r.ok) throw new Error(`explorer: HTTP ${r.status}`);
+			return r.text();
+		};
+		const hash = (await get(`/block-height/${att.height}`)).trim();
+		const block = JSON.parse(await get(`/block/${hash}`));
+		if (block.merkle_root === att.merkleRoot) return att.height;
+		throw new Error(`the proof does not match block ${att.height}`);
+	}
+	return null;
+}
+
+/**
  * Fetches and verifies the receipts of the bundle a credential paid for.
  * @param {object} o
  * @param {string} o.seller the seller's origin, e.g. https://lampo.run
@@ -126,6 +157,8 @@ async function findAnchorNote(issuer, anchorId, relays) {
  * @param {string} [o.issuer] the issuer key to require; defaults to the seller's published one
  * @param {boolean} [o.checkNostr]
  * @param {Receipt[]} [o.known] receipts saved earlier, which must not have changed
+ * @param {boolean} [o.checkBitcoin] check each anchor's timestamp against a block explorer
+ * @param {string} [o.explorer] an Esplora API, default https://mempool.space/api
  * @param {typeof fetch} [o.fetch]
  * @returns {Promise<BundleReport>}
  */
@@ -193,6 +226,8 @@ export async function verifyBundle(o) {
 	const anchors = new Map();
 	let anchored = 0;
 	let onNostr = 0;
+	/** @type {{ day: string, height: number }[]} */
+	const inBitcoin = [];
 	for (const r of receipts) {
 		const proof = body.proofs?.[r.seq];
 		if (!proof) {
@@ -206,6 +241,13 @@ export async function verifyBundle(o) {
 				const issues = checkAnchor(a, issuer);
 				if (issues.length) problems.push(...issues.map((p) => `anchor ${proof.day}: ${p}`));
 				anchors.set(proof.day, issues.length ? null : a);
+				if (!issues.length && o.checkBitcoin) {
+					const found = await checkTimestamp(a, origin, o.explorer ?? "https://mempool.space/api", fetchImpl).catch((e) => {
+						problems.push(`anchor ${proof.day}: timestamp: ${e.message}`);
+						return null;
+					});
+					if (found) inBitcoin.push({ day: proof.day, height: found });
+				}
 				if (!issues.length && o.checkNostr && Array.isArray(wk.relays) && wk.relays.length) {
 					if (await findAnchorNote(issuer, a.id, wk.relays).catch(() => false)) onNostr += 1;
 					else problems.push(`anchor ${proof.day}: not found on the seller's Nostr relays`);
@@ -224,5 +266,5 @@ export async function verifyBundle(o) {
 		}
 	}
 
-	return { ok: problems.length === 0, seller: origin, issuer, chain, anchored, onNostr, problems, receipts };
+	return { ok: problems.length === 0, seller: origin, issuer, chain, anchored, onNostr, inBitcoin, problems, receipts };
 }

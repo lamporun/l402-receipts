@@ -10,7 +10,9 @@ const HELP = `l402-receipts: signed, verifiable usage receipts for metered L402 
 
 Buyers:
   l402-receipts verify --seller https://lampo.run --credential "L402 <macaroon>:<preimage>"
-      [--issuer <hex key>] [--nostr] [--json]
+      [--issuer <hex key>] [--nostr] [--bitcoin] [--json]
+    --nostr checks that each anchor was posted on the seller's relays;
+    --bitcoin checks each anchor's timestamp against mempool.space.
     The credential can also come from --credential-file <path> or the
     L402_CREDENTIAL environment variable.
 
@@ -61,6 +63,7 @@ const { values: a } = parseArgs({
 		"credential-file": { type: "string" },
 		issuer: { type: "string" },
 		nostr: { type: "boolean", default: false },
+		bitcoin: { type: "boolean", default: false },
 		json: { type: "boolean", default: false },
 		out: { type: "string" },
 		db: { type: "string" },
@@ -106,6 +109,7 @@ if (cmd === "verify") {
 		credential: /** @type {string} */ (credential),
 		issuer: a.issuer,
 		checkNostr: a.nostr,
+		checkBitcoin: a.bitcoin,
 	}).catch((e) => fail(e.message));
 	if (a.json) {
 		const { receipts, ...summary } = report;
@@ -118,6 +122,7 @@ if (cmd === "verify") {
 		console.log(`usage ${n(c.usage.prompt)} prompt (${n(c.usage.cached)} cached) + ${n(c.usage.completion)} completion tokens`);
 		if (c.initialTokens !== null) console.log(`bundle ${n(c.initialTokens)} tokens, debited ${n(c.debited)}, ${n(c.remaining ?? 0)} left`);
 		console.log(`${report.anchored} of ${c.receipts} receipts proven in a daily anchor${a.nostr ? `, ${report.onNostr} anchors found on Nostr` : ""}`);
+		for (const b of report.inBitcoin) console.log(`anchor of ${b.day} timestamped in Bitcoin block ${b.height.toLocaleString("en-US")}`);
 		if (report.ok) console.log("OK: every receipt checks out");
 		else for (const p of report.problems) console.log(`PROBLEM: ${p}`);
 	}
