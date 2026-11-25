@@ -60,10 +60,14 @@ if (!report.ok) console.log(report.problems);
 l402-receipts reads a [Lightmeter](https://github.com/lightninglabs/lightmeter)
 database. The meter has to record the usage behind every debit and the
 payment behind every token: that is the optional `meterd.UsageLedger`
-interface of Aperture's meter, implemented by Lightmeter's sqlite store
-(patches in review upstream; until then build from
-[lamporun/aperture](https://github.com/lamporun/aperture) and
-[lamporun/lightmeter](https://github.com/lamporun/lightmeter)).
+interface of Aperture's meter, implemented by Lightmeter's sqlite store.
+Both changes are in review upstream
+([aperture#346](https://github.com/lightninglabs/aperture/pull/346),
+[lightmeter#9](https://github.com/lightninglabs/lightmeter/pull/9)); until
+they are merged, build Lightmeter from the `usage-ledger` branch of
+[lamporun/lightmeter](https://github.com/lamporun/lightmeter/tree/usage-ledger),
+which pulls the Aperture change from
+[lamporun/aperture](https://github.com/lamporun/aperture/tree/meterd-usage-ledger).
 
 ```sh
 # A dedicated key, readable only by the service user.
