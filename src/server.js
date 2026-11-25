@@ -27,6 +27,7 @@ import { auditPath, merkleRoot } from "./merkle.js";
  * @property {string} since
  * @property {string[]} relays
  * @property {number} [perTokenPerMinute]
+ * @property {number} [pageSize] receipts per answer (default 500)
  * @property {number} [failuresPerMinute]
  */
 
@@ -83,7 +84,7 @@ function sendJson(res, status, body, headers = {}) {
 
 /** @param {ServerOptions} o */
 export function createReceiptServer(o) {
-	const perToken = limiter(o.perTokenPerMinute ?? 60);
+	const perToken = limiter(o.perTokenPerMinute ?? 120);
 	const failures = limiter(o.failuresPerMinute ?? 20);
 
 	/** @type {Map<string, { root: string, ids: string[] }>} */
@@ -138,10 +139,12 @@ export function createReceiptServer(o) {
 			}
 			if (!perToken.hit(cred.token)) return sendJson(res, 429, { error: "too many requests" }, { "Retry-After": "60" });
 
-			const list = o.ledger.receipts(cred.token);
-			if (list === null) return sendJson(res, 404, { error: `this bundle was bought before receipts started on ${o.since}` });
-			const after = Math.max(0, Number.parseInt(url.searchParams.get("after") || "0", 10) || 0);
-			const receipts = list.filter((r) => r.seq > after);
+			const bodies = o.ledger.bodies(cred.token);
+			if (bodies === null) return sendJson(res, 404, { error: `this bundle was bought before receipts started on ${o.since}` });
+			const after = Math.min(bodies.length, Math.max(0, Number.parseInt(url.searchParams.get("after") || "0", 10) || 0));
+			const page = o.pageSize ?? 500;
+			const receipts = o.ledger.sign(bodies.slice(after, after + page));
+			const more = after + page < bodies.length;
 
 			/** @type {Record<string, unknown>} */
 			const proofs = {};
@@ -154,7 +157,7 @@ export function createReceiptServer(o) {
 				if (index < 0 || leaves.root !== anchor.root) continue;
 				proofs[r.seq] = { day, anchor: anchor.id, index, size: leaves.ids.length, path: auditPath(leaves.ids, index) };
 			}
-			return sendJson(res, 200, { v: 1, issuer: o.issuer, token: cred.token, receipts, proofs }, { "Cache-Control": "no-store" });
+			return sendJson(res, 200, { v: 1, issuer: o.issuer, token: cred.token, receipts, proofs, more }, { "Cache-Control": "no-store" });
 		}
 
 		if (url.pathname === "/receipts/anchors/" || url.pathname === "/receipts/anchors") {

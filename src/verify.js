@@ -135,10 +135,18 @@ export async function verifyBundle(o) {
 	const cred = parseCredential(o.credential);
 	/** @param {string} url @param {RequestInit} [init] */
 	const getJson = async (url, init) => {
-		const res = await fetchImpl(url, { ...init, redirect: "error", signal: AbortSignal.timeout(20000) });
-		const body = await res.json().catch(() => ({}));
-		if (!res.ok) throw new Error(`${url}: ${body.error || `HTTP ${res.status}`}`);
-		return body;
+		for (let attempt = 0; ; attempt++) {
+			const res = await fetchImpl(url, { ...init, redirect: "error", signal: AbortSignal.timeout(20000) });
+			const body = await res.json().catch(() => ({}));
+			if (res.status === 429 && attempt < 5) {
+				// Rate limited: wait as asked, at most a minute.
+				const wait = Math.min(60, Math.max(1, Number(res.headers.get("retry-after")) || 5));
+				await new Promise((r) => setTimeout(r, wait * 1000));
+				continue;
+			}
+			if (!res.ok) throw new Error(`${url}: ${body.error || `HTTP ${res.status}`}`);
+			return body;
+		}
 	};
 
 	const wk = await getJson(`${origin}/.well-known/l402-receipts.json`);
@@ -149,9 +157,20 @@ export async function verifyBundle(o) {
 	const receiptsUrl = new URL(wk.receipts);
 	if (receiptsUrl.origin !== origin) throw new Error(`receipts are served from another origin: ${receiptsUrl.origin}`);
 
-	const body = await getJson(receiptsUrl.href, { headers: { Authorization: o.credential } });
+	// The seller answers in pages; follow them to the end.
 	/** @type {Receipt[]} */
-	const receipts = body.receipts ?? [];
+	const receipts = [];
+	/** @type {{ proofs: Record<string, any> }} */
+	const body = { proofs: {} };
+	for (let pages = 0; ; pages++) {
+		if (pages > 10000) throw new Error("too many pages of receipts");
+		const after = receipts.length ? receipts[receipts.length - 1].seq : 0;
+		const page = await getJson(`${receiptsUrl.href}?after=${after}`, { headers: { Authorization: o.credential } });
+		const list = Array.isArray(page.receipts) ? page.receipts : [];
+		receipts.push(...list);
+		Object.assign(body.proofs, page.proofs ?? {});
+		if (!page.more || list.length === 0) break;
+	}
 	const chain = checkChain(receipts, { issuer, credential: cred });
 	problems.push(...chain.problems);
 

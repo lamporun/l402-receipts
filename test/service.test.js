@@ -97,6 +97,9 @@ test("a buyer verifies its receipts end to end, through the anchors", async (t) 
 	// The seller rewrites an anchored debit in its ledger. The buyer's saved
 	// copy and the anchor both expose it.
 	s.lm.db.prepare("UPDATE usage_events SET tokens = tokens + 1, remaining_tokens = remaining_tokens - 1 WHERE id = 1").run();
+	// The issuer caches each bundle's chain; a cheating seller restarts it.
+	s.ledger.chains.clear();
+	s.ledger.sigs.clear();
 	report = await verifyBundle({ seller: "http://seller.test", credential: s.alice.header, fetch: s.fetchImpl, known: saved });
 	const all = report.problems.join("\n");
 	assert.match(all, /receipt 1: changed since you saved it/);
@@ -135,6 +138,45 @@ test("receipts are only served to the payer", async (t) => {
 	assert.equal((await fetch(`${s.base}/receipts/anchors/2026-11-25.json`)).status, 404);
 	assert.equal((await fetch(`${s.base}/receipts`, { method: "POST" })).status, 405);
 	assert.equal((await fetch(`${s.base}/receipts/anchors/../../etc/passwd`)).status, 404);
+});
+
+test("long histories are paged, and only the requested receipts are signed", async (t) => {
+	const s = await seller();
+	t.after(() => s.server.close());
+	const server = createReceiptServer({ ...s.opts, pageSize: 100 });
+	await new Promise((r) => server.listen(0, "127.0.0.1", () => r(null)));
+	t.after(() => server.close());
+	const base = `http://127.0.0.1:${/** @type {import("node:net").AddressInfo} */ (server.address()).port}`;
+
+	// 3,000 more debits on Alice's bundle.
+	s.lm.db.exec("BEGIN");
+	for (let i = 0; i < 3000; i++) s.lm.debit(s.alice.token, { time: s.d2 + 100 + i, debit: 7, source: "total", total: 7 });
+	s.lm.db.exec("COMMIT");
+
+	const get = (/** @type {number} */ after) =>
+		fetch(`${base}/receipts?after=${after}`, { headers: { Authorization: s.alice.header } }).then((r) => r.json());
+	let started = performance.now();
+	const first = await get(0);
+	const firstMs = performance.now() - started;
+	assert.equal(first.receipts.length, 100);
+	assert.equal(first.receipts[0].seq, 1);
+	assert.equal(first.more, true);
+
+	// The chain is now cached: the newest receipts cost almost nothing.
+	started = performance.now();
+	const last = await get(3002);
+	assert.deepEqual(last.receipts.map((/** @type {any} */ r) => r.seq), [3003]);
+	assert.equal(last.more, false);
+	assert.ok(performance.now() - started < 200, "a request for the newest receipt must not rework the whole history");
+	assert.ok(s.ledger.sigs.size <= 101, `signed ${s.ledger.sigs.size} receipts, expected only the ones served`);
+	void firstMs;
+
+	// The verifier follows every page and checks the whole history.
+	/** @type {typeof fetch} */
+	const fetchImpl = (input, init) => fetch(String(input).replace("http://seller.test", base), init);
+	const report = await verifyBundle({ seller: "http://seller.test", credential: s.alice.header, fetch: fetchImpl });
+	assert.deepEqual(report.problems, []);
+	assert.equal(report.chain.receipts, 3003);
 });
 
 test("bundles with history from before receipts get none", async (t) => {

@@ -10,6 +10,10 @@ export type ServerOptions = {
     since: string;
     relays: string[];
     perTokenPerMinute?: number;
+    /**
+     * receipts per answer (default 500)
+     */
+    pageSize?: number;
     failuresPerMinute?: number;
 };
 /** @param {ServerOptions} o */

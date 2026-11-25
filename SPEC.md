@@ -116,11 +116,14 @@ pair it with a payment of their own. The answer:
   "issuer": "…",
   "token": "…",
   "receipts": [ … ],
-  "proofs": { "1": { "day": "2026-11-25", "anchor": "<anchor id>", "index": 0, "size": 12, "path": ["…"] } }
+  "proofs": { "1": { "day": "2026-11-25", "anchor": "<anchor id>", "index": 0, "size": 12, "path": ["…"] } },
+  "more": false
 }
 ```
 
-`receipts` are the bundle's receipts with `seq > after`, oldest first.
+`receipts` are the bundle's receipts with `seq > after`, oldest first, at most
+one page (500 on lampo.run). When more follow, `more` is true and the client
+asks again with `after` set to the last `seq` it received.
 `proofs` holds, for every receipt whose day is already anchored, its audit
 path in that day's tree.
 

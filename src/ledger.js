@@ -7,7 +7,7 @@
 // before that has no receipts: its history cannot be fully explained.
 
 import { DatabaseSync } from "node:sqlite";
-import { GENESIS, RECEIPT_VERSION, receiptId, signReceipt } from "./receipt.js";
+import { GENESIS, RECEIPT_VERSION, receiptBody, receiptId, signReceipt } from "./receipt.js";
 
 /** @typedef {import("./receipt.js").Receipt} Receipt */
 /** @typedef {import("./receipt.js").ReceiptBody} ReceiptBody */
@@ -99,7 +99,17 @@ export class Ledger {
 		this.db.exec("PRAGMA busy_timeout = 5000");
 		this.issuer = key.issuer;
 		this.secretKey = key.secretKey;
-		this.byToken = this.db.prepare(`SELECT ${COLUMNS} ${FROM} WHERE e.token_id = ? ORDER BY e.id`);
+		this.byToken = this.db.prepare(`SELECT ${COLUMNS} ${FROM} WHERE e.token_id = ? AND e.id > ? ORDER BY e.id`);
+		/**
+		 * Each bundle's receipt bodies with their ids, extended with new
+		 * ledger rows only: the ledger is append-only, so a long history is
+		 * hashed once, not on every request. null marks a bundle whose
+		 * history predates receipts.
+		 * @type {Map<string, { lastEvent: number, prev: string, bodies: (ReceiptBody & { id: string })[] } | null>}
+		 */
+		this.chains = new Map();
+		/** Signatures already made, by receipt id. @type {Map<string, string>} */
+		this.sigs = new Map();
 		this.tokensOnDay = this.db.prepare(
 			`SELECT DISTINCT e.token_id FROM usage_events e WHERE e.created_at >= ? AND e.created_at < ?`,
 		);
@@ -118,35 +128,70 @@ export class Ledger {
 	}
 
 	/**
-	 * The unsigned receipt bodies of a bundle, oldest first, or null when the
-	 * bundle's history predates receipts or has no payment binding.
+	 * The unsigned receipt bodies of a bundle with their ids, oldest first,
+	 * or null when the bundle's history predates receipts or has no payment
+	 * binding. The returned array is shared: do not modify it.
 	 * @param {string} token
-	 * @returns {ReceiptBody[] | null}
+	 * @returns {(ReceiptBody & { id: string })[] | null}
 	 */
 	bodies(token) {
-		const rows = /** @type {LedgerRow[]} */ (/** @type {unknown} */ (this.byToken.all(token)));
-		if (rows.length === 0) return [];
-		if (rows.some((r) => r.remaining_tokens == null || r.payment_hash == null)) return null;
-		/** @type {ReceiptBody[]} */
-		const out = [];
-		let prev = GENESIS;
-		for (const [i, row] of rows.entries()) {
-			const body = rowToBody(row, i + 1, prev, this.issuer);
-			prev = receiptId(body);
-			out.push(body);
+		let chain = this.chains.get(token);
+		if (chain === null) return null;
+		if (!chain) chain = { lastEvent: 0, prev: GENESIS, bodies: [] };
+		const rows = /** @type {LedgerRow[]} */ (/** @type {unknown} */ (this.byToken.all(token, chain.lastEvent)));
+		if (rows.some((r) => r.remaining_tokens == null || r.payment_hash == null)) {
+			this.remember(token, null);
+			return null;
 		}
-		return out;
+		for (const row of rows) {
+			const body = rowToBody(row, chain.bodies.length + 1, chain.prev, this.issuer);
+			const id = receiptId(body);
+			chain.bodies.push({ ...body, id });
+			chain.prev = id;
+			chain.lastEvent = row.id;
+		}
+		if (chain.bodies.length) this.remember(token, chain);
+		return chain.bodies;
 	}
 
 	/**
-	 * The signed receipts of a bundle, oldest first; null as for bodies.
 	 * @param {string} token
+	 * @param {{ lastEvent: number, prev: string, bodies: (ReceiptBody & { id: string })[] } | null} chain
+	 */
+	remember(token, chain) {
+		if (this.chains.size > 5000 && !this.chains.has(token)) this.chains.clear();
+		this.chains.set(token, chain);
+	}
+
+	/**
+	 * Signs receipt bodies, reusing signatures already made.
+	 * @param {(ReceiptBody & { id: string })[]} bodies
+	 * @returns {Receipt[]}
+	 */
+	sign(bodies) {
+		return bodies.map((b) => {
+			let sig = this.sigs.get(b.id);
+			if (!sig) {
+				sig = signReceipt(b, this.secretKey).sig;
+				if (this.sigs.size > 100000) this.sigs.clear();
+				this.sigs.set(b.id, sig);
+			}
+			return { ...receiptBody(b), id: b.id, sig };
+		});
+	}
+
+	/**
+	 * The signed receipts of a bundle after the given seq, oldest first, at
+	 * most `limit` of them; null as for bodies.
+	 * @param {string} token
+	 * @param {number} [after]
+	 * @param {number} [limit]
 	 * @returns {Receipt[] | null}
 	 */
-	receipts(token) {
+	receipts(token, after = 0, limit = Infinity) {
 		const bodies = this.bodies(token);
 		if (bodies === null) return null;
-		return bodies.map((b) => signReceipt(b, this.secretKey));
+		return this.sign(bodies.slice(after, after + limit));
 	}
 
 	/**
@@ -163,7 +208,7 @@ export class Ledger {
 		for (const { token_id } of tokens) {
 			const list = this.bodies(token_id);
 			if (!list) continue;
-			for (const b of list) if (b.time >= from && b.time < to) out.push({ id: receiptId(b), event: b.event, token: b.token, seq: b.seq });
+			for (const b of list) if (b.time >= from && b.time < to) out.push({ id: b.id, event: b.event, token: b.token, seq: b.seq });
 		}
 		return out.sort((a, b) => a.event - b.event);
 	}

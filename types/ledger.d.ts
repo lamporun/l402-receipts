@@ -33,6 +33,22 @@ export declare class Ledger {
     issuer: string;
     secretKey: Uint8Array<ArrayBufferLike>;
     byToken: import("node:sqlite").StatementSync;
+    /**
+     * Each bundle's receipt bodies with their ids, extended with new
+     * ledger rows only: the ledger is append-only, so a long history is
+     * hashed once, not on every request. null marks a bundle whose
+     * history predates receipts.
+     * @type {Map<string, { lastEvent: number, prev: string, bodies: (ReceiptBody & { id: string })[] } | null>}
+     */
+    chains: Map<string, {
+        lastEvent: number;
+        prev: string;
+        bodies: (ReceiptBody & {
+            id: string;
+        })[];
+    } | null>;
+    /** Signatures already made, by receipt id. @type {Map<string, string>} */
+    sigs: Map<string, string>;
     tokensOnDay: import("node:sqlite").StatementSync;
     payment: import("node:sqlite").StatementSync;
     firstDay: import("node:sqlite").StatementSync;
@@ -48,18 +64,43 @@ export declare class Ledger {
     /** @param {string} token */
     paymentHash(token: string): string | null;
     /**
-     * The unsigned receipt bodies of a bundle, oldest first, or null when the
-     * bundle's history predates receipts or has no payment binding.
+     * The unsigned receipt bodies of a bundle with their ids, oldest first,
+     * or null when the bundle's history predates receipts or has no payment
+     * binding. The returned array is shared: do not modify it.
      * @param {string} token
-     * @returns {ReceiptBody[] | null}
+     * @returns {(ReceiptBody & { id: string })[] | null}
      */
-    bodies(token: string): ReceiptBody[] | null;
+    bodies(token: string): (ReceiptBody & {
+        id: string;
+    })[] | null;
     /**
-     * The signed receipts of a bundle, oldest first; null as for bodies.
      * @param {string} token
+     * @param {{ lastEvent: number, prev: string, bodies: (ReceiptBody & { id: string })[] } | null} chain
+     */
+    remember(token: string, chain: {
+        lastEvent: number;
+        prev: string;
+        bodies: (ReceiptBody & {
+            id: string;
+        })[];
+    } | null): void;
+    /**
+     * Signs receipt bodies, reusing signatures already made.
+     * @param {(ReceiptBody & { id: string })[]} bodies
+     * @returns {Receipt[]}
+     */
+    sign(bodies: (ReceiptBody & {
+        id: string;
+    })[]): Receipt[];
+    /**
+     * The signed receipts of a bundle after the given seq, oldest first, at
+     * most `limit` of them; null as for bodies.
+     * @param {string} token
+     * @param {number} [after]
+     * @param {number} [limit]
      * @returns {Receipt[] | null}
      */
-    receipts(token: string): Receipt[] | null;
+    receipts(token: string, after?: number, limit?: number): Receipt[] | null;
     /**
      * The ids of every receipt with a time in [from, to), ordered by ledger
      * event: the leaves of that period's anchor.
