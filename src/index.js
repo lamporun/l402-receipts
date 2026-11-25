@@ -4,3 +4,7 @@ export { auditPath, merkleRoot, verifyInclusion } from "./merkle.js";
 export { decodeIdentifier, macaroonIdentifier, parseCredential } from "./credential.js";
 export { addDays, anchorBody, anchorNote, checkAnchor, dayBounds, dayOf, makeAnchor } from "./anchor.js";
 export { checkChain, verifyBundle } from "./verify.js";
+
+/** @typedef {import("./receipt.js").Receipt} Receipt */
+/** @typedef {import("./receipt.js").ReceiptBody} ReceiptBody */
+/** @typedef {import("./anchor.js").Anchor} Anchor */
