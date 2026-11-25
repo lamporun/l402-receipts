@@ -32,14 +32,14 @@ npx github:lamporun/l402-receipts verify --seller https://lampo.run \
   --credential "L402 AgEEbHNhd...:9f86d081..." --nostr
 ```
 
-Example output:
+Real output for a Lampo bundle bought on 25 November 2026, before its first daily anchor:
 
 ```
-https://lampo.run, issuer 30699c50…
+https://lampo.run, issuer 30699c5071a8dc6b6e01e3b96d98ad8563b44b418aa85bf06dab3160baa31d50
 4 receipts: 4 debits recomputed exactly, 0 settled at an estimate
-usage 18,240 prompt (12,800 cached) + 2,113 completion tokens
-bundle 2,789,400 tokens, debited 7,925, 2,781,475 left
-4 of 4 receipts proven in a daily anchor, 1 anchors found on Nostr
+usage 9,661 prompt (0 cached) + 199 completion tokens
+bundle 2,509,410 tokens, debited 6,717, 2,502,693 left
+0 of 4 receipts proven in a daily anchor, 0 anchors found on Nostr
 OK: every receipt checks out
 ```
 
