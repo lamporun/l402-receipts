@@ -213,10 +213,49 @@ export async function verifyBundle(o) {
 		else if (now.id !== k.id) problems.push(`receipt ${k.seq}: changed since you saved it`);
 	}
 
+
+	const anchoring = await checkAnchoring({
+		receipts,
+		proofs: body.proofs,
+		requireProofs: true,
+		origin,
+		issuer,
+		relays: wk.relays,
+		getJson,
+		fetchImpl,
+		checkNostr: o.checkNostr,
+		checkBitcoin: o.checkBitcoin,
+		explorer: o.explorer,
+	});
+	problems.push(...anchoring.problems);
+	const { anchored, onNostr, inBitcoin } = anchoring;
+	return { ok: problems.length === 0, seller: origin, issuer, chain, anchored, onNostr, inBitcoin, problems, receipts };
+}
+
+/**
+ * Checks the inclusion proofs of receipts against the seller's signed daily
+ * anchors, and optionally the anchors' Nostr notes and Bitcoin timestamps.
+ * @param {object} o
+ * @param {Receipt[]} o.receipts
+ * @param {Record<string, any>} o.proofs by receipt seq or id
+ * @param {boolean} o.requireProofs whether a receipt of an anchored day without a proof is a problem
+ * @param {string} o.origin
+ * @param {string} o.issuer
+ * @param {string[] | undefined} o.relays
+ * @param {(url: string) => Promise<any>} o.getJson
+ * @param {typeof fetch} o.fetchImpl
+ * @param {boolean} [o.checkNostr]
+ * @param {boolean} [o.checkBitcoin]
+ * @param {string} [o.explorer]
+ */
+async function checkAnchoring(o) {
+	const { origin, issuer } = o;
+	/** @type {string[]} */
+	const problems = [];
 	/** @type {Set<string>} */
 	let anchoredDays = new Set();
 	try {
-		const index = await getJson(`${origin}/receipts/anchors/`);
+		const index = await o.getJson(`${origin}/receipts/anchors/`);
 		anchoredDays = new Set((index.anchors ?? []).filter(Boolean).map((/** @type {{ day: string }} */ x) => x.day));
 	} catch (e) {
 		problems.push(`anchor index: ${/** @type {Error} */ (e).message}`);
@@ -225,31 +264,35 @@ export async function verifyBundle(o) {
 	/** @type {Map<string, Anchor | null>} */
 	const anchors = new Map();
 	let anchored = 0;
+	let unproven = 0;
 	let onNostr = 0;
 	/** @type {{ day: string, height: number }[]} */
 	const inBitcoin = [];
-	for (const r of receipts) {
-		const proof = body.proofs?.[r.seq];
+	for (const r of o.receipts) {
+		const proof = o.proofs?.[r.id] ?? o.proofs?.[r.seq];
 		if (!proof) {
+			unproven += 1;
 			const day = new Date(r.time * 1000).toISOString().slice(0, 10);
-			if (anchoredDays.has(day)) problems.push(`receipt ${r.seq}: its day ${day} is anchored, but the seller gives no proof that it is included`);
+			if (o.requireProofs && anchoredDays.has(day)) {
+				problems.push(`receipt ${r.seq}: its day ${day} is anchored, but the seller gives no proof that it is included`);
+			}
 			continue;
 		}
 		if (!anchors.has(proof.day)) {
 			try {
-				const a = await getJson(`${origin}/receipts/anchors/${proof.day}.json`);
+				const a = await o.getJson(`${origin}/receipts/anchors/${proof.day}.json`);
 				const issues = checkAnchor(a, issuer);
 				if (issues.length) problems.push(...issues.map((p) => `anchor ${proof.day}: ${p}`));
 				anchors.set(proof.day, issues.length ? null : a);
 				if (!issues.length && o.checkBitcoin) {
-					const found = await checkTimestamp(a, origin, o.explorer ?? "https://mempool.space/api", fetchImpl).catch((e) => {
+					const found = await checkTimestamp(a, origin, o.explorer ?? "https://mempool.space/api", o.fetchImpl).catch((e) => {
 						problems.push(`anchor ${proof.day}: timestamp: ${e.message}`);
 						return null;
 					});
 					if (found) inBitcoin.push({ day: proof.day, height: found });
 				}
-				if (!issues.length && o.checkNostr && Array.isArray(wk.relays) && wk.relays.length) {
-					if (await findAnchorNote(issuer, a.id, wk.relays).catch(() => false)) onNostr += 1;
+				if (!issues.length && o.checkNostr && Array.isArray(o.relays) && o.relays.length) {
+					if (await findAnchorNote(issuer, a.id, o.relays).catch(() => false)) onNostr += 1;
 					else problems.push(`anchor ${proof.day}: not found on the seller's Nostr relays`);
 				}
 			} catch (e) {
@@ -265,6 +308,94 @@ export async function verifyBundle(o) {
 			anchored += 1;
 		}
 	}
+	return { anchored, unproven, onNostr, inBitcoin, problems };
+}
 
-	return { ok: problems.length === 0, seller: origin, issuer, chain, anchored, onNostr, inBitcoin, problems, receipts };
+/**
+ * Checks receipts that are not a whole bundle history: a few receipts someone
+ * kept or was handed, for example by a service that splits one bundle among
+ * several users. Each must be signed by the issuer and its debit must
+ * recompute from its usage and rates; receipts of one bundle that follow each
+ * other must chain. Unlike checkChain, this cannot show that none is missing.
+ * @param {Receipt[]} receipts
+ * @param {string} issuer
+ */
+export function checkReceipts(receipts, issuer) {
+	/** @type {string[]} */
+	const problems = [];
+	const list = [...receipts].sort((a, b) => (a.token === b.token ? a.seq - b.seq : a.token < b.token ? -1 : 1));
+	let recomputed = 0;
+	let estimated = 0;
+	for (let i = 0; i < list.length; i++) {
+		const r = list[i];
+		const at = `receipt ${r.seq}`;
+		for (const p of checkSignature(r, issuer)) problems.push(`${at}: ${p}`);
+		if (!Number.isSafeInteger(r.debit) || r.debit < 0) problems.push(`${at}: invalid debit`);
+		const want = expectedDebit(r);
+		if (want === null) {
+			if (r.source === "estimate") estimated += 1;
+		} else if (want === r.debit) {
+			recomputed += 1;
+		} else {
+			problems.push(`${at}: debited ${r.debit} tokens, its usage at its rates costs ${want}`);
+		}
+		const prev = list[i - 1];
+		if (prev && prev.token === r.token) {
+			if (prev.seq === r.seq && prev.id !== r.id) problems.push(`${at}: two different receipts at the same position`);
+			if (prev.seq + 1 === r.seq) {
+				if (r.prev !== prev.id) problems.push(`${at}: does not chain to receipt ${prev.seq}`);
+				const w = Math.max(0, prev.remaining - r.debit);
+				if (r.remaining !== w) problems.push(`${at}: balance ${r.remaining}, expected ${prev.remaining} - ${r.debit} = ${w}`);
+			}
+		}
+	}
+	return { ok: problems.length === 0, problems, receipts: list.length, recomputed, estimated };
+}
+
+/**
+ * Verifies loose receipts (see checkReceipts) against a seller's published
+ * issuer key, and their inclusion proofs against its daily anchors.
+ * @param {object} o
+ * @param {string} o.seller the seller's origin
+ * @param {Receipt[]} o.receipts
+ * @param {Record<string, any>} [o.proofs] inclusion proofs, by receipt seq or id
+ * @param {string} [o.issuer] the issuer key to require; defaults to the seller's published one
+ * @param {boolean} [o.checkNostr]
+ * @param {boolean} [o.checkBitcoin]
+ * @param {string} [o.explorer]
+ * @param {typeof fetch} [o.fetch]
+ */
+export async function verifyReceipts(o) {
+	const fetchImpl = o.fetch ?? fetch;
+	const origin = new URL(o.seller).origin;
+	/** @param {string} url */
+	const getJson = async (url) => {
+		const res = await fetchImpl(url, { redirect: "error", signal: AbortSignal.timeout(20000) });
+		const body = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(`${url}: ${body.error || `HTTP ${res.status}`}`);
+		return body;
+	};
+	const wk = await getJson(`${origin}/.well-known/l402-receipts.json`);
+	const issuer = o.issuer ?? wk.issuer;
+	/** @type {string[]} */
+	const problems = [];
+	if (wk.issuer !== issuer) problems.push(`the seller now publishes issuer ${wk.issuer}, expected ${issuer}`);
+	const checked = checkReceipts(o.receipts, issuer);
+	problems.push(...checked.problems);
+	const anchoring = await checkAnchoring({
+		receipts: o.receipts,
+		proofs: o.proofs ?? {},
+		requireProofs: false,
+		origin,
+		issuer,
+		relays: wk.relays,
+		getJson,
+		fetchImpl,
+		checkNostr: o.checkNostr,
+		checkBitcoin: o.checkBitcoin,
+		explorer: o.explorer,
+	});
+	problems.push(...anchoring.problems);
+	const { anchored, unproven, onNostr, inBitcoin } = anchoring;
+	return { ok: problems.length === 0, seller: origin, issuer, checked, anchored, unproven, onNostr, inBitcoin, problems };
 }

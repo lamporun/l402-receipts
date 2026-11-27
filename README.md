@@ -32,27 +32,54 @@ npx github:lamporun/l402-receipts verify --seller https://lampo.run \
   --credential "L402 AgEEbHNhd...:9f86d081..." --nostr --bitcoin
 ```
 
-Real output for a Lampo bundle bought on 25 November 2026, before its first daily anchor:
+Real output for a Lampo bundle bought on 25 November 2026, checked two days later:
 
 ```
 https://lampo.run, issuer 30699c5071a8dc6b6e01e3b96d98ad8563b44b418aa85bf06dab3160baa31d50
-4 receipts: 4 debits recomputed exactly, 0 settled at an estimate
-usage 9,661 prompt (0 cached) + 199 completion tokens
-bundle 2,509,410 tokens, debited 6,717, 2,502,693 left
-0 of 4 receipts proven in a daily anchor, 0 anchors found on Nostr
+6 receipts: 6 debits recomputed exactly, 0 settled at an estimate
+usage 9,689 prompt (0 cached) + 392 completion tokens
+bundle 2,509,410 tokens, debited 6,993, 2,502,417 left
+4 of 6 receipts proven in a daily anchor, 1 anchor found on Nostr
+anchor of 2026-11-25 timestamped in Bitcoin block 977,599
 OK: every receipt checks out
 ```
 
-Add `--bitcoin` to also check each anchor's OpenTimestamps proof against the
-block's merkle root on mempool.space (once the timestamp is in a block, a few
-hours after the day ends). Any problem is printed as `PROBLEM: …` and the
+The two receipts without a proof are from that day: they join the next anchor.
+
+`--bitcoin` checks each anchor's OpenTimestamps proof against the block's
+merkle root on mempool.space (once the timestamp is in a block, a few hours
+after the day ends); `--nostr` checks that the anchor was posted on the
+seller's relays. Any problem is printed as `PROBLEM: …` and the
 command exits with status 1.
 The credential can also come from `--credential-file` or `L402_CREDENTIAL`.
+
+### Receipts without the bundle
+
+Someone may hand you receipts without the credential: a service that splits one
+bundle among its users, or a receipt kept as evidence. `check` verifies those:
+the seller's signature, the debit recomputed from usage and rates, and the
+inclusion proof against the day's anchor. It cannot tell whether other
+receipts of the bundle are missing; only `verify`, with the credential, can.
+
+```sh
+curl -s https://lampo.run/try/receipts -H "Authorization: Bearer $TRIAL_KEY" > receipts.json
+npx -y github:lamporun/l402-receipts check --seller https://lampo.run receipts.json
+```
+
+```
+https://lampo.run, issuer 30699c5071a8dc6b6e01e3b96d98ad8563b44b418aa85bf06dab3160baa31d50
+2 receipts signed by the issuer: 2 debits recomputed exactly, 0 settled at an estimate
+0 of 2 proven in a daily anchor (2 without a proof yet: anchors are made after each UTC day)
+OK: every receipt checks out
+```
+
+The input is a receipt, a list, or `{"receipts": [...], "proofs": {...}}` with
+proofs keyed by receipt id or seq; `-` reads standard input.
 
 As a library:
 
 ```js
-import { verifyBundle, checkChain } from "l402-receipts";
+import { verifyBundle, verifyReceipts, checkChain } from "l402-receipts";
 
 const report = await verifyBundle({ seller: "https://lampo.run", credential, checkNostr: true });
 if (!report.ok) console.log(report.problems);

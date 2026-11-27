@@ -8,7 +8,7 @@ import { Ledger } from "../src/ledger.js";
 import { otsFile } from "../src/ots.js";
 import { GENESIS, weightedDebit } from "../src/receipt.js";
 import { createReceiptServer } from "../src/server.js";
-import { verifyBundle } from "../src/verify.js";
+import { verifyBundle, verifyReceipts } from "../src/verify.js";
 import { fakeLightmeter, l402Credential, tempDir, testKey } from "./helpers.js";
 
 const DAY1 = "2026-11-25";
@@ -105,6 +105,43 @@ test("a buyer verifies its receipts end to end, through the anchors", async (t) 
 	assert.match(all, /receipt 1: changed since you saved it/);
 	assert.match(all, /anchored, but the seller gives no proof/);
 	assert.match(all, /its usage at its rates costs/);
+});
+
+test("receipts handed over one by one check out, and tampering shows", async (t) => {
+	const s = await seller();
+	t.after(() => s.server.close());
+	await runAnchorJob({ ...s.opts, secretKey: s.key.secretKey, timestamp: false, now: s.d2 + 86400 + 600 });
+	const page = await (await fetch(`${s.base}/receipts?after=0`, { headers: { Authorization: s.alice.header } })).json();
+	const [r1, r2, r3] = page.receipts;
+	const check = (/** @type {any[]} */ receipts, /** @type {any} */ proofs, extra = {}) =>
+		verifyReceipts({ seller: "http://seller.test", receipts, proofs, fetch: s.fetchImpl, ...extra });
+
+	// One receipt and its proof, without the rest of the bundle.
+	let report = await check([r2], { [r2.seq]: page.proofs[r2.seq] });
+	assert.deepEqual(report.problems, []);
+	assert.equal(report.checked.recomputed, 1);
+	assert.equal(report.anchored, 1);
+
+	// Two that follow each other must chain; one without a proof is reported, not failed.
+	report = await check([r2, r1, r3], { [r1.id]: page.proofs[r1.seq] });
+	assert.deepEqual(report.problems, []);
+	assert.equal(report.anchored, 1);
+	assert.equal(report.unproven, 2);
+	assert.equal(report.checked.estimated, 1);
+
+	// A changed debit breaks the signature, and the arithmetic.
+	report = await check([{ ...r2, debit: r2.debit + 1 }], {});
+	assert.match(report.problems.join("\n"), /receipt 2: id does not match/);
+	assert.match(report.problems.join("\n"), /its usage at its rates costs/);
+
+	// A proof for another receipt does not prove this one.
+	report = await check([r2], { [r2.seq]: page.proofs[r1.seq] });
+	assert.match(report.problems.join("\n"), /receipt 2: not included in the anchor/);
+
+	// Receipts from another key are not the seller's.
+	report = await check([r2], {}, { issuer: testKey(2).issuer });
+	assert.match(report.problems.join("\n"), /the seller now publishes issuer/);
+	assert.match(report.problems.join("\n"), /receipt 2: issued by /);
 });
 
 test("receipts are only served to the payer", async (t) => {

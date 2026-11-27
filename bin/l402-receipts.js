@@ -16,6 +16,13 @@ Buyers:
     The credential can also come from --credential-file <path> or the
     L402_CREDENTIAL environment variable.
 
+  l402-receipts check --seller https://lampo.run <file | ->
+      [--issuer <hex key>] [--nostr] [--bitcoin] [--json]
+    Checks receipts you were handed without the whole bundle history: a
+    receipt, a list of them, or {"receipts": [...], "proofs": {...}}, from a
+    file or standard input. Each must be signed by the seller's key, its debit
+    must recompute, and its inclusion proof must match the day's anchor.
+
 Sellers (next to a Lightmeter whose store keeps the usage ledger):
   l402-receipts keygen --out <key file>
   l402-receipts serve  --db <lightmeter.db> --key <key file> --anchors <dir>
@@ -55,7 +62,7 @@ function checkDay(day) {
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
-const { values: a } = parseArgs({
+const { values: a, positionals } = parseArgs({
 	args: rest,
 	options: {
 		seller: { type: "string" },
@@ -76,10 +83,11 @@ const { values: a } = parseArgs({
 		"no-ots": { type: "boolean", default: false },
 		help: { type: "boolean", short: "h", default: false },
 	},
-	allowPositionals: false,
+	allowPositionals: true,
 });
+if (positionals.length > (cmd === "check" ? 1 : 0)) fail(`unexpected argument ${positionals[positionals.length - 1]}\n\n${HELP}`);
 
-if (!cmd || cmd === "help" || a.help) {
+if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h" || a.help) {
 	process.stdout.write(HELP);
 	process.exit(0);
 }
@@ -121,7 +129,42 @@ if (cmd === "verify") {
 		console.log(`${c.receipts} receipts: ${c.recomputed} debits recomputed exactly, ${c.estimated} settled at an estimate`);
 		console.log(`usage ${n(c.usage.prompt)} prompt (${n(c.usage.cached)} cached) + ${n(c.usage.completion)} completion tokens`);
 		if (c.initialTokens !== null) console.log(`bundle ${n(c.initialTokens)} tokens, debited ${n(c.debited)}, ${n(c.remaining ?? 0)} left`);
-		console.log(`${report.anchored} of ${c.receipts} receipts proven in a daily anchor${a.nostr ? `, ${report.onNostr} anchors found on Nostr` : ""}`);
+		console.log(`${report.anchored} of ${c.receipts} receipts proven in a daily anchor${a.nostr ? `, ${report.onNostr} anchor${report.onNostr === 1 ? "" : "s"} found on Nostr` : ""}`);
+		for (const b of report.inBitcoin) console.log(`anchor of ${b.day} timestamped in Bitcoin block ${b.height.toLocaleString("en-US")}`);
+		if (report.ok) console.log("OK: every receipt checks out");
+		else for (const p of report.problems) console.log(`PROBLEM: ${p}`);
+	}
+	process.exit(report.ok ? 0 : 1);
+}
+
+if (cmd === "check") {
+	const { verifyReceipts } = await import("../src/verify.js");
+	const src = positionals[0];
+	if (!src) fail(`pass a file of receipts, or - to read them from standard input\n\n${HELP}`);
+	/** @type {any} */
+	let input;
+	try {
+		input = JSON.parse(fs.readFileSync(src === "-" ? 0 : src, "utf8"));
+	} catch (e) {
+		fail(`cannot read receipts from ${src}: ${/** @type {Error} */ (e).message}`);
+	}
+	const receipts = Array.isArray(input) ? input : Array.isArray(input?.receipts) ? input.receipts : input?.sig ? [input] : null;
+	if (!receipts || !receipts.length) fail(`${src} holds no receipts`);
+	const report = await verifyReceipts({
+		seller: need(a.seller, "seller"),
+		receipts,
+		proofs: input?.proofs ?? {},
+		issuer: a.issuer,
+		checkNostr: a.nostr,
+		checkBitcoin: a.bitcoin,
+	}).catch((e) => fail(e.message));
+	if (a.json) {
+		console.log(JSON.stringify(report, null, 2));
+	} else {
+		const c = report.checked;
+		console.log(`${report.seller}, issuer ${report.issuer}`);
+		console.log(`${c.receipts} receipts signed by the issuer: ${c.recomputed} debits recomputed exactly, ${c.estimated} settled at an estimate`);
+		console.log(`${report.anchored} of ${c.receipts} proven in a daily anchor${report.unproven ? ` (${report.unproven} without a proof yet: anchors are made after each UTC day)` : ""}${a.nostr ? `, ${report.onNostr} anchor${report.onNostr === 1 ? "" : "s"} found on Nostr` : ""}`);
 		for (const b of report.inBitcoin) console.log(`anchor of ${b.day} timestamped in Bitcoin block ${b.height.toLocaleString("en-US")}`);
 		if (report.ok) console.log("OK: every receipt checks out");
 		else for (const p of report.problems) console.log(`PROBLEM: ${p}`);
@@ -164,6 +207,6 @@ if (cmd === "serve" || cmd === "anchor") {
 	const stop = () => server.close(() => (ledger.close(), process.exit(0)));
 	process.on("SIGTERM", stop);
 	process.on("SIGINT", stop);
-} else if (!["keygen", "verify"].includes(cmd)) {
+} else if (!["keygen", "verify", "check"].includes(cmd)) {
 	fail(`unknown command ${cmd}\n\n${HELP}`);
 }

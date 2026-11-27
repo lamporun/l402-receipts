@@ -106,3 +106,61 @@ export declare function verifyBundle(o: {
     explorer?: string;
     fetch?: typeof fetch;
 }): Promise<BundleReport>;
+/**
+ * Checks receipts that are not a whole bundle history: a few receipts someone
+ * kept or was handed, for example by a service that splits one bundle among
+ * several users. Each must be signed by the issuer and its debit must
+ * recompute from its usage and rates; receipts of one bundle that follow each
+ * other must chain. Unlike checkChain, this cannot show that none is missing.
+ * @param {Receipt[]} receipts
+ * @param {string} issuer
+ */
+export declare function checkReceipts(receipts: Receipt[], issuer: string): {
+    ok: boolean;
+    problems: string[];
+    receipts: number;
+    recomputed: number;
+    estimated: number;
+};
+/**
+ * Verifies loose receipts (see checkReceipts) against a seller's published
+ * issuer key, and their inclusion proofs against its daily anchors.
+ * @param {object} o
+ * @param {string} o.seller the seller's origin
+ * @param {Receipt[]} o.receipts
+ * @param {Record<string, any>} [o.proofs] inclusion proofs, by receipt seq or id
+ * @param {string} [o.issuer] the issuer key to require; defaults to the seller's published one
+ * @param {boolean} [o.checkNostr]
+ * @param {boolean} [o.checkBitcoin]
+ * @param {string} [o.explorer]
+ * @param {typeof fetch} [o.fetch]
+ */
+export declare function verifyReceipts(o: {
+    seller: string;
+    receipts: Receipt[];
+    proofs?: Record<string, any>;
+    issuer?: string;
+    checkNostr?: boolean;
+    checkBitcoin?: boolean;
+    explorer?: string;
+    fetch?: typeof fetch;
+}): Promise<{
+    ok: boolean;
+    seller: string;
+    issuer: any;
+    checked: {
+        ok: boolean;
+        problems: string[];
+        receipts: number;
+        recomputed: number;
+        estimated: number;
+    };
+    anchored: number;
+    unproven: number;
+    onNostr: number;
+    inBitcoin: {
+        day: string;
+        height: number;
+    }[];
+    problems: string[];
+}>;
